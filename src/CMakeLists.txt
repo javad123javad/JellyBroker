@@ -19,6 +19,7 @@ set(COMMON_SOURCES
     core/context.h
     core/delivery_engine.h core/delivery_engine.cpp
     mdns/mdns_responder.h mdns/mdns_responder.cpp
+    admin/admin_server.h admin/admin_server.cpp
     session.h session.cpp
     server.h server.cpp
     broker.h broker.cpp

@@ -48,6 +48,13 @@ void Broker::run() {
         mdns_->start();
     }
 
+    if (config_.admin_enabled()) {
+        auto* admin_ssl = config_.admin_tls_enabled() ? ssl_ctx_.get() : nullptr;
+        admin_ = std::make_unique<AdminServer>(
+            io_, ctx_, config_.host(), config_.admin_port(), admin_ssl);
+        admin_->start();
+    }
+
     running_ = true;
 
     Logger::instance().info("MQTT Broker started on port {} with {} workers",
@@ -73,6 +80,11 @@ void Broker::shutdown() {
     if (mdns_) {
         mdns_->stop();
         mdns_.reset();
+    }
+
+    if (admin_) {
+        admin_->stop();
+        admin_.reset();
     }
 
     if (server_) {

@@ -43,6 +43,7 @@ COPY --from=builder /build/config/broker.json /etc/mqtt-broker/broker.json
 EXPOSE 1883
 EXPOSE 8883
 EXPOSE 5353/udp
+EXPOSE 1884
 
 ENTRYPOINT ["mqtt_broker"]
 CMD ["/etc/mqtt-broker/broker.json"]

@@ -29,6 +29,11 @@
     "mdns": {
         "enabled": true
     },
+    "admin": {
+        "enabled": true,
+        "port": 1884,
+        "tls_enabled": false
+    },
     "logging": {
         "level": "info",
         "file": "logs/broker.log"

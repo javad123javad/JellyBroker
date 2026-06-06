@@ -34,6 +34,9 @@ public:
     const std::string& client_id() const { return client_id_; }
     bool connected() const { return connected_; }
     const std::string& remote_ip() const { return remote_ip_; }
+    const std::string& username() const { return username_; }
+    bool clean_session() const { return clean_session_; }
+    uint16_t keepalive() const { return keepalive_; }
 
 private:
     void do_ssl_handshake();

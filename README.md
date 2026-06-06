@@ -132,6 +132,8 @@ Client ──TCP/TLS──→ Server accept
 | **`boost::asio::strand` per session** | Lock-free serialized access to session state; shared state (TopicTree, QoS maps) uses `std::mutex` |
 | **`PacketParser` with internal buffer** | Handles partial reads (TCP framing); accumulates until a complete MQTT packet is available |
 | **Write queue with HWM** | Prevents OOM from slow consumers; configurable max queue depth |
+| **AdminServer via `unique_ptr` (no `enable_shared_from_this`)** | Avoids `bad_weak_ptr` crash; Broker guarantees AdminServer lifetime |
+| **Optional `ssl::stream` via conditional `unique_ptr`** | Session uses runtime check (`is_tls_`) instead of compile-time polymorphism; same code path for TLS and plain TCP |
 
 ## Build
 
@@ -156,6 +158,26 @@ cmake --build build
 ./build/src/mqtt_broker          # uses config/broker.json
 ./build/src/mqtt_broker my.json  # custom config
 ```
+
+### Linux (Debian Trixie / Ubuntu)
+
+```bash
+# Install dependencies
+sudo apt install g++ cmake ninja-build libboost-system-dev \
+    libssl-dev libgtest-dev libpqxx-dev pkg-config
+
+# Build
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DOPENSSL_ROOT_DIR=/usr \
+      -DCMAKE_PREFIX_PATH=/usr/lib/x86_64-linux-gnu \
+      -B build
+cmake --build build
+
+# Run
+./build/src/mqtt_broker config/broker.json
+```
+
+> **Note:** If libpqxx is installed, cmake detects it via pkg-config and enables `HAS_LIBPQXX=1`. Verify with `cmake -B build 2>&1 | grep libpqxx`.
 
 ### Windows (MSYS2 UCRT64)
 
@@ -183,6 +205,20 @@ docker run -p 1883:1883 -p 5353:5353/udp mqtt-broker
 
 # Full stack with PostgreSQL auth
 docker compose up --build
+```
+
+The `docker-compose.yml` starts the broker and a PostgreSQL 16 container. The `config/schema.sql` is mounted and creates the `clients` and `acls` tables automatically. Configure auth in the config file:
+
+```json
+{
+    "auth": {
+        "backend": "postgres",
+        "postgres": {
+            "connection_string": "host=postgres port=5432 dbname=mqtt user=mqtt password=mqtt",
+            "pool_size": 4
+        }
+    }
+}
 ```
 
 ### CMake Options
@@ -297,6 +333,45 @@ When enabled, the broker advertises itself via mDNS/DNS-SD on the local network 
 |---|---|---|
 | `enabled` | `false` | Enable mDNS advertising on port 5353 |
 
+### Admin Endpoint
+
+A TCP admin interface on a configurable port for runtime inspection. Communicates in JSON over plain text or TLS.
+
+```json
+{
+    "admin": {
+        "enabled": true,
+        "port": 1884,
+        "tls_enabled": false
+    }
+}
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable admin TCP endpoint |
+| `port` | `1884` | Admin listen port |
+| `tls_enabled` | `false` | Wrap admin socket in TLS (reuses the broker TLS cert/key) |
+
+**Commands:**
+
+| Command | Response |
+|---|---|
+| `STATS\n` | `{"active_connections": N, "received": N, "published": N, ...}` |
+| `CLIENTS\n` | `[{"client_id": "...", "address": "...", "username": "...", ...}, ...]` |
+| `CLIENT <id>\n` | `{"client_id": "...", "address": "...", "username": "...", ...}` or `{}` if not found |
+
+Example:
+
+```bash
+# Plain text
+echo "STATS" | nc localhost 1884
+
+# TLS (requires cert)
+openssl s_client -connect localhost:1884
+STATS
+```
+
 ## Authentication & ACLs
 
 ### AllowAll (default)
@@ -359,7 +434,7 @@ Packet IDs are allocated from a per-client pool with collision avoidance: `in_us
 
 | Feature | Mechanism |
 |---|---|
-| **Transport encryption** | TLS via `boost::asio::ssl::stream` (config.pem cert+key) |
+| **Transport encryption** | TLS via `boost::asio::ssl::stream` (config cert+key) |
 | **Authentication** | AllowAll (dev) or PostgreSQL (SHA-256 password hash) |
 | **Authorization** | Per-topic ACLs (READ/WRITE/READWRITE) with TTL-based caching |
 | **Brute force protection** | Per-IP rate limiting with configurable ban |
@@ -370,6 +445,7 @@ Packet IDs are allocated from a per-client pool with collision avoidance: `in_us
 | **Topic limits** | Max depth (segments) and length (bytes) |
 | **Input validation** | All packet parsing wrapped in try-catch |
 | **Remaining-length validation** | Overflow-safe decode with 4-byte max |
+| **Admin endpoint TLS** | Optional TLS on admin port (reuses broker cert) |
 
 ## Resource Limits
 
@@ -402,13 +478,17 @@ cmake --build build
 | `TopicFilterTest` | 8 | Exact match, `+`/`#` wildcards, validation, split |
 | `TopicTreeTest` | 6 | Subscribe/lookup, wildcard dispatch, retained messages |
 
-### Integration Tests (11 tests)
+### Integration Tests (19 tests)
 
 Requires Python 3 + [paho-mqtt](https://pypi.org/project/paho-mqtt/). Starts/stops the broker automatically per test class.
 
 ```bash
 pip install paho-mqtt
 python ClientPy/test_integration.py
+
+# With PostgreSQL auth (requires PG_CONN_STR env var):
+PG_CONN_STR="host=localhost dbname=mqtt user=mqtt password=mqtt" \
+    python ClientPy/test_integration.py
 ```
 
 | Test class | Tests | What it covers |
@@ -417,6 +497,8 @@ python ClientPy/test_integration.py
 | `TestPublishSubscribe` | 5 | QoS 0/1/2 pub/sub, multiple subscribers |
 | `TestWildcards` | 2 | Single-level (`+`) and multi-level (`#`) matching |
 | `TestRetained` | 1 | Retained message storage and delivery on subscribe |
+| `TestTls` | 4 | MQTT connect/pub-sub over TLS, admin STATS/CLIENTS over TLS |
+| `PostgresAuthTestCase` | 4 | PostgreSQL auth connect, bad password rejection, allowed/denied publish (skipped unless `PG_CONN_STR` is set) |
 
 ### Stress Test
 
@@ -473,6 +555,10 @@ src/
 ├── session.h/.cpp            Client session (state machine)
 ├── server.h/.cpp             TCP acceptor
 ├── subscription.h/.cpp       Persistent subscription storage
+├── admin/
+│   └── admin_server.h/.cpp   TCP admin endpoint (JSON, optional TLS)
+├── mdns/
+│   └── mdns_responder.h/.cpp mDNS/DNS-SD advertisement (UDP 5353)
 ├── packet/                   MQTT packet layer
 │   ├── types.h               Packet types, enums
 │   ├── parser.h/.cpp         Stream parser (residue buffer)
@@ -484,17 +570,20 @@ src/
 ├── auth/                     Authentication
 │   ├── authenticator.h       Interface
 │   ├── allow_all_authenticator.h  Dev mode
-│   └── pg_authenticator.h/.cpp    PostgreSQL
+│   └── pg_authenticator.h/.cpp    PostgreSQL (SHA-256, ACL caching)
 ├── qos/                      QoS handlers
 │   ├── qos0.h/.cpp           Fire-and-forget
 │   ├── qos1.h/.cpp           At-least-once (retry + ack)
 │   └── qos2.h/.cpp           Exactly-once (4-way handshake)
 ├── core/                     Cross-cutting
-│   ├── context.h             BrokerContext, ServerState
-│   └── delivery_engine.h/.cpp  Publish fan-out router
-└── utils/
-    ├── buffer.h/.cpp         Binary buffer read/write
-    └── timer.h/.cpp          Interval timer
+│   ├── context.h             BrokerContext, ServerState, MessageCounters
+│   └── delivery_engine.h/.cpp  Publish fan-out router (incoming QoS 2)
+├── utils/
+│   ├── buffer.h/.cpp         Binary buffer read/write
+│   └── timer.h/.cpp          Interval timer
+ClientPy/
+├── test_integration.py       19 integration tests (connect, pub/sub, TLS, admin, PG auth)
+└── stress_test.py            Stress/performance test client
 ```
 
 ## Troubleshooting
@@ -516,6 +605,20 @@ Check broker logs for:
 - `Write queue overflow` — client is too slow to consume; increase `max_write_queue_size` or investigate client
 - `Auth rate limit: X.X.X.X is banned` — too many failed auth attempts; wait for ban to expire or restart broker
 - `Per-IP limit reached` — too many connections from one IP; increase `max_connections_per_ip`
+
+### Docker PostgreSQL: broker can't connect
+
+Check that the `docker-compose.yml` healthcheck passes (`pg_isready`) before the broker starts. The broker will fail if the database isn't ready. Ensure the `connection_string` host matches the Docker service name (`postgres`, not `localhost`).
+
+### Broker built without libpqxx (HAS_LIBPQXX=0)
+
+On Debian/Ubuntu, install `libpqxx-dev` and `pkg-config` then reconfigure:
+
+```bash
+sudo apt install libpqxx-dev pkg-config
+cmake -B build 2>&1 | grep libpqxx
+# Should show: libpqxx FOUND — building with PostgreSQL auth backend
+```
 
 ### High memory usage
 

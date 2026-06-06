@@ -189,11 +189,31 @@ bool Config::is_valid() const {
         return false;
     }
 
+    if (admin_enabled()) {
+        auto admin_port_val = admin_port();
+        if (admin_port_val == 0) {
+            validation_error_ = "admin.port must not be 0 when admin is enabled";
+            return false;
+        }
+    }
+
     return true;
 }
 
 bool Config::mdns_enabled() const {
     return json_.value("mdns", nlohmann::json::object()).value("enabled", false);
+}
+
+bool Config::admin_enabled() const {
+    return json_.value("admin", nlohmann::json::object()).value("enabled", false);
+}
+
+uint16_t Config::admin_port() const {
+    return json_.value("admin", nlohmann::json::object()).value("port", 1884);
+}
+
+bool Config::admin_tls_enabled() const {
+    return json_.value("admin", nlohmann::json::object()).value("tls_enabled", false);
 }
 
 std::string Config::validation_error() const {

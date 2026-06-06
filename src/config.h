@@ -37,6 +37,10 @@ public:
 
     bool mdns_enabled() const;
 
+    bool admin_enabled() const;
+    uint16_t admin_port() const;
+    bool admin_tls_enabled() const;
+
     bool tls_enabled() const;
     std::string tls_cert_file() const;
     std::string tls_key_file() const;
