@@ -3,12 +3,18 @@
 #include "logger.h"
 #include <iostream>
 #include <string>
+#include <filesystem>
 
 int main(int argc, char* argv[]) {
     std::string config_path = "config/broker.json";
 
     if (argc > 1) {
         config_path = argv[1];
+    }
+
+    if (!std::filesystem::exists(config_path)) {
+        std::cerr << "Fatal: Config file not found: " << config_path << std::endl;
+        return 1;
     }
 
     try {

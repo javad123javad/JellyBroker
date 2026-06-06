@@ -1,10 +1,26 @@
 #include "qos2.h"
 #include "session.h"
+#include "config.h"
 #include "logger.h"
 #include <chrono>
 
 Qos2Handler::Qos2Handler(boost::asio::io_context& io)
     : io_(io) {
+}
+
+uint16_t Qos2Handler::allocate_packet_id(ClientOutgoing& client) {
+    uint16_t start = client.next_packet_id;
+    while (client.in_use.count(client.next_packet_id) > 0) {
+        client.next_packet_id++;
+        if (client.next_packet_id == 0) client.next_packet_id = 1;
+        if (client.next_packet_id == start) {
+            return 0;
+        }
+    }
+    uint16_t pid = client.next_packet_id++;
+    if (client.next_packet_id == 0) client.next_packet_id = 1;
+    client.in_use.insert(pid);
+    return pid;
 }
 
 void Qos2Handler::deliver(TopicTree& tree, const PublishPacket& pub) {
@@ -25,7 +41,12 @@ void Qos2Handler::deliver(TopicTree& tree, const PublishPacket& pub) {
 
         std::lock_guard<std::mutex> lock(mutex_);
         auto& client = outgoing_[session->client_id()];
-        uint16_t pid = client.next_packet_id++;
+
+        uint16_t pid = allocate_packet_id(client);
+        if (pid == 0) {
+            Logger::instance().warn("QoS2 packet ID space exhausted for {}", session->client_id());
+            continue;
+        }
 
         auto publish_pkt = PacketBuilder::build_publish(
             pub.topic, pub.payload.data(), pub.payload.size(),
@@ -41,11 +62,10 @@ void Qos2Handler::deliver(TopicTree& tree, const PublishPacket& pub) {
 
         session->deliver(publish_pkt);
 
-        msg.retry_timer->start(
-            std::chrono::seconds(5),
-            [this, client_id = session->client_id(), pid]() {
-                retry_message(client_id, pid);
-            });
+        auto interval = std::chrono::seconds(Config::instance().retry_interval_seconds());
+        msg.retry_timer->start(interval, [this, client_id = session->client_id(), pid]() {
+            retry_message(client_id, pid);
+        });
     }
 }
 
@@ -68,11 +88,6 @@ void Qos2Handler::handle_pubrec(const std::string& client_id, uint16_t packet_id
 }
 
 void Qos2Handler::handle_pubrel(const std::string& client_id, uint16_t packet_id) {
-    // Subscriber sent PUBREL, we send PUBCOMP
-    // This handles the case where broker receives PUBREL
-    // The session handler will call this and build PUBCOMP
-
-    // Find the outgoing message and finalize
     std::lock_guard<std::mutex> lock(mutex_);
     auto client_it = outgoing_.find(client_id);
     if (client_it == outgoing_.end()) return;
@@ -81,6 +96,7 @@ void Qos2Handler::handle_pubrel(const std::string& client_id, uint16_t packet_id
     if (msg_it == client_it->second.messages.end()) return;
 
     msg_it->second.retry_timer->cancel();
+    client_it->second.in_use.erase(packet_id);
     client_it->second.messages.erase(msg_it);
 
     if (client_it->second.messages.empty()) {
@@ -97,6 +113,7 @@ void Qos2Handler::handle_pubcomp(const std::string& client_id, uint16_t packet_i
     if (msg_it == client_it->second.messages.end()) return;
 
     msg_it->second.retry_timer->cancel();
+    client_it->second.in_use.erase(packet_id);
     client_it->second.messages.erase(msg_it);
 
     if (client_it->second.messages.empty()) {
@@ -113,8 +130,10 @@ void Qos2Handler::retry_message(const std::string& client_id, uint16_t packet_id
     if (msg_it == client_it->second.messages.end()) return;
 
     auto& msg = msg_it->second;
-    if (msg.retry_count >= 3) {
-        Logger::instance().warn("QoS 2 retry exhausted for client {} packet {}", client_id, packet_id);
+    auto max_retries = Config::instance().max_retry_count();
+    if (msg.retry_count >= max_retries) {
+        Logger::instance().warn("QoS 2 retry exhausted for {} packet {}", client_id, packet_id);
+        client_it->second.in_use.erase(packet_id);
         client_it->second.messages.erase(msg_it);
         if (client_it->second.messages.empty()) {
             outgoing_.erase(client_it);
@@ -140,9 +159,8 @@ void Qos2Handler::retry_message(const std::string& client_id, uint16_t packet_id
         }
     }
 
-    msg.retry_timer->start(
-        std::chrono::seconds(5),
-        [this, client_id, packet_id]() {
-            retry_message(client_id, packet_id);
-        });
+    auto interval = std::chrono::seconds(Config::instance().retry_interval_seconds());
+    msg.retry_timer->start(interval, [this, client_id, packet_id]() {
+        retry_message(client_id, packet_id);
+    });
 }

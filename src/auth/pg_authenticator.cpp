@@ -59,7 +59,7 @@ AuthResult PgAuthenticator::authenticate(const std::string& client_id,
                                          const std::string& password) {
     AuthResult result;
     result.success = false;
-    result.reason = ConnackCode::REFUSED_SERVER_UNAVAIL;
+    result.reason = ConnackCode::REFUSED_NOT_AUTHORIZED;
 
     auto* pc = acquire();
     if (!pc) return result;
@@ -73,7 +73,7 @@ AuthResult PgAuthenticator::authenticate(const std::string& client_id,
             client_id);
 
         if (query.empty()) {
-            result.reason = ConnackCode::REFUSED_ID_REJECTED;
+            // Return same generic error to prevent client enumeration
             txn.commit();
             release(pc);
             return result;
@@ -88,9 +88,8 @@ AuthResult PgAuthenticator::authenticate(const std::string& client_id,
         if (computed_hash == stored_hash) {
             result.success = true;
             result.reason = ConnackCode::ACCEPTED;
-        } else {
-            result.reason = ConnackCode::REFUSED_BAD_USERNAME;
         }
+        // Same generic error for wrong password
 
         txn.commit();
     } catch (const std::exception& e) {

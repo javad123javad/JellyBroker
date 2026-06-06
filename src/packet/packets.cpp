@@ -43,13 +43,18 @@ PublishPacket PublishPacket::parse(Buffer& buf, const FixedHeader& hdr) {
 
     pkt.topic = buf.read_string();
 
+    size_t consumed = 2 + pkt.topic.size();
+
     if (pkt.qos > 0) {
         pkt.packet_id = buf.read_uint16();
+        consumed += 2;
     }
 
     size_t payload_len = hdr.remaining_length;
-    payload_len -= 2 + pkt.topic.size();  // topic length prefix + topic
-    if (pkt.qos > 0) payload_len -= 2;
+    if (payload_len < consumed) {
+        throw std::runtime_error("Invalid publish packet: remaining_length too small");
+    }
+    payload_len -= consumed;
 
     if (payload_len > 0) {
         pkt.payload = Buffer(buf.read_head(), payload_len);
@@ -85,24 +90,36 @@ UnsubscribePacket UnsubscribePacket::parse(Buffer& buf, uint32_t remaining_lengt
 }
 
 PubackPacket PubackPacket::parse(Buffer& buf) {
+    if (buf.readable() < 2) {
+        throw std::runtime_error("Invalid puback packet");
+    }
     PubackPacket pkt;
     pkt.packet_id = buf.read_uint16();
     return pkt;
 }
 
 PubrecPacket PubrecPacket::parse(Buffer& buf) {
+    if (buf.readable() < 2) {
+        throw std::runtime_error("Invalid pubrec packet");
+    }
     PubrecPacket pkt;
     pkt.packet_id = buf.read_uint16();
     return pkt;
 }
 
 PubrelPacket PubrelPacket::parse(Buffer& buf) {
+    if (buf.readable() < 2) {
+        throw std::runtime_error("Invalid pubrel packet");
+    }
     PubrelPacket pkt;
     pkt.packet_id = buf.read_uint16();
     return pkt;
 }
 
 PubcompPacket PubcompPacket::parse(Buffer& buf) {
+    if (buf.readable() < 2) {
+        throw std::runtime_error("Invalid pubcomp packet");
+    }
     PubcompPacket pkt;
     pkt.packet_id = buf.read_uint16();
     return pkt;

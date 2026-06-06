@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 class Session;
 
@@ -28,12 +29,13 @@ private:
     struct ClientPending {
         std::unordered_map<uint16_t, PendingMessage> messages;
         uint16_t next_packet_id = 1;
+        std::unordered_set<uint16_t> in_use;
     };
 
     boost::asio::io_context& io_;
     std::unordered_map<std::string, ClientPending> pending_;
     std::mutex mutex_;
 
-    uint16_t next_packet_id(const std::string& client_id);
+    uint16_t allocate_packet_id(ClientPending& client);
     void retry_message(const std::string& client_id, uint16_t packet_id);
 };

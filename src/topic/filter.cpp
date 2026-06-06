@@ -1,4 +1,5 @@
 #include "filter.h"
+#include "config.h"
 #include <sstream>
 
 namespace topic {
@@ -45,7 +46,12 @@ bool matches(const std::string& topic, const std::string& filter) {
 bool is_valid_topic(const std::string& topic) {
     if (topic.empty()) return false;
 
+    auto max_len = Config::instance().max_topic_length();
+    if (static_cast<int>(topic.size()) > max_len) return false;
+
     auto segments = split(topic);
+    if (static_cast<int>(segments.size()) > Config::instance().max_topic_depth()) return false;
+
     for (const auto& seg : segments) {
         if (seg.empty()) return false;
         if (seg == "+" || seg == "#") return false;
@@ -56,14 +62,26 @@ bool is_valid_topic(const std::string& topic) {
 bool is_valid_filter(const std::string& filter) {
     if (filter.empty()) return false;
 
+    auto max_len = Config::instance().max_topic_length();
+    if (static_cast<int>(filter.size()) > max_len) return false;
+
     auto segments = split(filter);
+    if (static_cast<int>(segments.size()) > Config::instance().max_topic_depth()) return false;
+
     for (size_t i = 0; i < segments.size(); ++i) {
         const auto& seg = segments[i];
+
         if (seg.empty()) return false;
 
+        // '+' must be an entire segment, not part of one
+        if (seg.find('+') != std::string::npos && seg != "+") return false;
+
+        // '#' must be entire segment and only in last position
         if (seg == "#") {
             return i == segments.size() - 1;
         }
+        // '#' appearing inside a segment
+        if (seg.find('#') != std::string::npos) return false;
     }
     return true;
 }

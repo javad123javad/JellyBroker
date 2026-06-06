@@ -1,6 +1,8 @@
 #include "topic_tree.h"
 #include "session.h"
+#include "config.h"
 #include <algorithm>
+#include <stack>
 
 void TopicTree::subscribe(const std::string& filter, SubscriberEntry entry) {
     std::unique_lock lock(mutex_);
@@ -69,38 +71,43 @@ std::vector<SubscriberEntry> TopicTree::lookup(const std::string& topic) {
     auto segments = topic::split(topic);
     std::vector<SubscriberEntry> result;
 
-    std::function<void(Node*, size_t)> traverse = [&](Node* node, size_t index) {
-        if (!node) return;
+    struct Frame {
+        Node* node;
+        size_t index;
+    };
+    std::stack<Frame> stack;
+    stack.push({&root_, 0});
+
+    while (!stack.empty()) {
+        auto [node, index] = stack.top();
+        stack.pop();
+        if (!node) continue;
 
         if (index >= segments.size()) {
             collect_subscribers(node, result);
-            return;
+            continue;
         }
 
         const auto& seg = segments[index];
 
-        // Multi-level wildcard match
         if (node->multi_wild) {
             collect_subscribers(node->multi_wild.get(), result);
         }
 
-        // Exact match
         auto it = node->children.find(seg);
         if (it != node->children.end()) {
-            traverse(it->second.get(), index + 1);
+            stack.push({it->second.get(), index + 1});
         }
 
-        // Single-level wildcard match
         if (node->single_wild) {
-            traverse(node->single_wild.get(), index + 1);
+            stack.push({node->single_wild.get(), index + 1});
         }
-    };
+    }
 
-    traverse(&root_, 0);
     return result;
 }
 
-void TopicTree::set_retained(const std::string& topic, const RetainedMessage& msg) {
+bool TopicTree::set_retained(const std::string& topic, const RetainedMessage& msg) {
     std::unique_lock lock(mutex_);
     auto segments = topic::split(topic);
     Node* node = &root_;
@@ -109,7 +116,21 @@ void TopicTree::set_retained(const std::string& topic, const RetainedMessage& ms
         node = ensure_node(node, seg);
     }
 
+    bool was_empty = !node->retained || node->retained->payload.empty();
+    bool new_empty = msg.payload.empty();
+
+    if (new_empty && !was_empty) {
+        --retained_count_;
+    } else if (!new_empty && was_empty) {
+        auto max_retained = Config::instance().max_retained_messages();
+        if (retained_count_.load() >= max_retained) {
+            return false;
+        }
+        ++retained_count_;
+    }
+
     node->retained = std::make_shared<RetainedMessage>(msg);
+    return true;
 }
 
 std::shared_ptr<RetainedMessage> TopicTree::get_retained(const std::string& topic) {
@@ -129,21 +150,21 @@ std::shared_ptr<RetainedMessage> TopicTree::get_retained(const std::string& topi
 std::vector<std::pair<std::string, RetainedMessage>> TopicTree::get_all_retained() {
     std::shared_lock lock(mutex_);
     std::vector<std::pair<std::string, RetainedMessage>> result;
-
-    std::function<void(Node*, std::string)> traverse = [&](Node* node, std::string path) {
-        if (node->retained) {
-            result.emplace_back(path, *node->retained);
-        }
-        for (const auto& [seg, child] : node->children) {
-            traverse(child.get(), path.empty() ? seg : path + "/" + seg);
-        }
-        if (node->single_wild) {
-            traverse(node->single_wild.get(), path.empty() ? "+" : path + "/+");
-        }
-    };
-
-    traverse(&root_, "");
+    get_all_retained(&root_, "", result);
     return result;
+}
+
+void TopicTree::get_all_retained(Node* node, std::string path,
+                                  std::vector<std::pair<std::string, RetainedMessage>>& result) {
+    if (node->retained) {
+        result.emplace_back(path, *node->retained);
+    }
+    for (const auto& [seg, child] : node->children) {
+        get_all_retained(child.get(), path.empty() ? seg : path + "/" + seg, result);
+    }
+    if (node->single_wild) {
+        get_all_retained(node->single_wild.get(), path.empty() ? "+" : path + "/+", result);
+    }
 }
 
 TopicTree::Node* TopicTree::ensure_node(Node* parent, const std::string& segment) {

@@ -8,8 +8,10 @@
 #include "auth/pg_authenticator.h"
 #endif
 #include "core/delivery_engine.h"
+#include "core/context.h"
 #include "server.h"
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <memory>
 #include <thread>
@@ -26,6 +28,8 @@ public:
 private:
     void setup_auth();
     void setup_signals();
+    void setup_tls();
+    void update_context();
 
     Config& config_;
     boost::asio::io_context io_;
@@ -34,6 +38,10 @@ private:
     SubscriptionManager sub_manager_;
     std::unique_ptr<Authenticator> auth_;
     DeliveryEngine delivery_;
+    ServerState server_state_;
+    std::unique_ptr<boost::asio::ssl::context> ssl_ctx_;
+
+    BrokerContext ctx_;
 
     std::unique_ptr<Server> server_;
 

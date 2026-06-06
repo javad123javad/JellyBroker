@@ -4,10 +4,17 @@
 #include <chrono>
 
 Session::Session(boost::asio::ip::tcp::socket socket,
-                 BrokerContext& ctx)
+                 BrokerContext& ctx,
+                 const std::string& remote_ip)
     : socket_(std::move(socket))
     , strand_(boost::asio::make_strand(socket_.get_executor()))
+    , remote_ip_(remote_ip)
     , ctx_(ctx) {
+
+    if (ctx_.ssl_ctx) {
+        ssl_stream_ = std::make_unique<boost::asio::ssl::stream<
+            boost::asio::ip::tcp::socket&>>(socket_, *ctx_.ssl_ctx);
+    }
 }
 
 Session::~Session() {
@@ -17,8 +24,28 @@ Session::~Session() {
 void Session::start() {
     auto self = shared_from_this();
     boost::asio::dispatch(strand_, [this, self]() {
-        do_read();
+        if (ssl_stream_) {
+            do_ssl_handshake();
+        } else {
+            do_read();
+        }
     });
+}
+
+void Session::do_ssl_handshake() {
+    auto self = shared_from_this();
+    ssl_stream_->async_handshake(
+        boost::asio::ssl::stream_base::server,
+        boost::asio::bind_executor(strand_,
+            [this, self](const boost::system::error_code& ec) {
+                if (ec) {
+                    Logger::instance().warn("SSL handshake failed from {}: {}", remote_ip_, ec.message());
+                    close();
+                    return;
+                }
+                Logger::instance().info("SSL handshake completed from {}", remote_ip_);
+                do_read();
+            }));
 }
 
 void Session::stop() {
@@ -27,12 +54,22 @@ void Session::stop() {
         keepalive_timer_->cancel();
     }
     boost::system::error_code ec;
+    if (ssl_stream_) {
+        ssl_stream_->shutdown(ec);
+    }
     socket_.close(ec);
 }
 
 void Session::deliver(const Buffer& packet) {
     auto self = shared_from_this();
     boost::asio::dispatch(strand_, [this, self, packet]() {
+        auto max_q = Config::instance().max_write_queue_size();
+        if (static_cast<int>(write_queue_.size()) >= max_q) {
+            Logger::instance().warn("Write queue overflow for {} ({}), closing",
+                                    client_id_, remote_ip_);
+            close();
+            return;
+        }
         bool was_empty = write_queue_.empty();
         write_queue_.push_back(packet);
         if (was_empty) {
@@ -46,20 +83,28 @@ void Session::do_read() {
     read_buf_.clear();
     read_buf_.ensure_writable(4096);
 
-    socket_.async_read_some(
-        boost::asio::buffer(read_buf_.write_head(), read_buf_.write_capacity()),
-        boost::asio::bind_executor(strand_,
-            [this, self](const boost::system::error_code& ec, size_t bytes) {
-                if (!ec) {
-                    read_buf_.advance_write(bytes);
-                }
-                on_read(ec, bytes);
-            }));
+    auto handler = boost::asio::bind_executor(strand_,
+        [this, self](const boost::system::error_code& ec, size_t bytes) {
+            if (!ec) {
+                read_buf_.advance_write(bytes);
+            }
+            on_read(ec, bytes);
+        });
+
+    if (ssl_stream_) {
+        ssl_stream_->async_read_some(
+            boost::asio::buffer(read_buf_.write_head(), read_buf_.write_capacity()),
+            handler);
+    } else {
+        socket_.async_read_some(
+            boost::asio::buffer(read_buf_.write_head(), read_buf_.write_capacity()),
+            handler);
+    }
 }
 
 void Session::on_read(const boost::system::error_code& ec, size_t bytes_transferred) {
     if (ec) {
-        Logger::instance().debug("Session read error: {}", ec.message());
+        Logger::instance().debug("Session read error from {}: {}", remote_ip_, ec.message());
         close();
         return;
     }
@@ -68,11 +113,17 @@ void Session::on_read(const boost::system::error_code& ec, size_t bytes_transfer
 
     Buffer packet;
     while (parser_.try_extract(packet)) {
-        handle_packet(packet);
+        try {
+            handle_packet(packet);
+        } catch (const std::exception& e) {
+            Logger::instance().warn("Session handler error from {}: {}", remote_ip_, e.what());
+            close();
+            return;
+        }
     }
 
     if (parser_.has_error()) {
-        Logger::instance().warn("Parse error: {}", parser_.error_message());
+        Logger::instance().warn("Parse error from {}: {}", remote_ip_, parser_.error_message());
         close();
         return;
     }
@@ -94,19 +145,28 @@ void Session::do_write() {
     auto self = shared_from_this();
     auto& packet = write_queue_.front();
 
-    boost::asio::async_write(
-        socket_,
-        boost::asio::buffer(packet.data(), packet.size()),
-        boost::asio::bind_executor(strand_,
-            [this, self](const boost::system::error_code& ec, size_t) {
-                if (ec) {
-                    Logger::instance().debug("Session write error: {}", ec.message());
-                    close();
-                    return;
-                }
-                write_queue_.pop_front();
-                do_write();
-            }));
+    auto handler = boost::asio::bind_executor(strand_,
+        [this, self](const boost::system::error_code& ec, size_t) {
+            if (ec) {
+                Logger::instance().debug("Session write error from {}: {}", remote_ip_, ec.message());
+                close();
+                return;
+            }
+            write_queue_.pop_front();
+            do_write();
+        });
+
+    if (ssl_stream_) {
+        boost::asio::async_write(
+            *ssl_stream_,
+            boost::asio::buffer(packet.data(), packet.size()),
+            handler);
+    } else {
+        boost::asio::async_write(
+            socket_,
+            boost::asio::buffer(packet.data(), packet.size()),
+            handler);
+    }
 }
 
 void Session::handle_packet(Buffer& packet) {
@@ -155,9 +215,29 @@ void Session::handle_packet(Buffer& packet) {
             handle_disconnect();
             break;
         default:
-            Logger::instance().warn("Unhandled packet type: {}", static_cast<int>(type));
+            Logger::instance().warn("Unhandled packet type from {}: {}", remote_ip_, static_cast<int>(type));
             break;
     }
+}
+
+bool Session::check_auth_rate_limit() {
+    if (!ctx_.server_state) return true;
+
+    std::lock_guard<std::mutex> lock(ctx_.server_state->mutex);
+    int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto ban_it = ctx_.server_state->auth_ban_until.find(remote_ip_);
+    if (ban_it != ctx_.server_state->auth_ban_until.end()) {
+        if (now < ban_it->second) {
+            Logger::instance().warn("Auth rate limit: {} is banned", remote_ip_);
+            return false;
+        }
+        ctx_.server_state->auth_ban_until.erase(ban_it);
+        ctx_.server_state->auth_failures.erase(remote_ip_);
+    }
+
+    return true;
 }
 
 void Session::handle_connect(Buffer& packet) {
@@ -166,7 +246,14 @@ void Session::handle_connect(Buffer& packet) {
         return;
     }
 
-    auto conn = ConnectPacket::parse(packet, 0);
+    ConnectPacket conn;
+    try {
+        conn = ConnectPacket::parse(packet, 0);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid CONNECT packet from {}: {}", remote_ip_, e.what());
+        close();
+        return;
+    }
 
     if (conn.protocol_name != MQTT_PROTOCOL_NAME || conn.protocol_level != MQTT_PROTOCOL_LEVEL) {
         Logger::instance().warn("Unsupported protocol: {}/{}", conn.protocol_name, conn.protocol_level);
@@ -183,10 +270,33 @@ void Session::handle_connect(Buffer& packet) {
         return;
     }
 
+    if (!check_auth_rate_limit()) {
+        auto nak = PacketBuilder::build_connack(false, ConnackCode::REFUSED_SERVER_UNAVAIL);
+        deliver(nak);
+        close();
+        return;
+    }
+
     if (!conn.username.empty() || !conn.password.empty()) {
         auto auth_result = ctx_.auth->authenticate(conn.client_id, conn.username, conn.password);
         if (!auth_result.success) {
-            Logger::instance().warn("Auth failed for client: {}", conn.client_id);
+            Logger::instance().warn("Auth failed for client: {} from {}", conn.client_id, remote_ip_);
+
+            if (ctx_.server_state) {
+                std::lock_guard<std::mutex> lock(ctx_.server_state->mutex);
+                int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                int fails = ++ctx_.server_state->auth_failures[remote_ip_];
+
+                auto max_attempts = Config::instance().max_auth_attempts();
+                if (fails >= max_attempts) {
+                    auto ban_secs = Config::instance().auth_ban_seconds();
+                    ctx_.server_state->auth_ban_until[remote_ip_] = now + ban_secs;
+                    Logger::instance().warn("Auth banned {} for {}s after {} failures",
+                                            remote_ip_, ban_secs, fails);
+                }
+            }
+
             auto nak = PacketBuilder::build_connack(false, auth_result.reason);
             deliver(nak);
             close();
@@ -194,10 +304,34 @@ void Session::handle_connect(Buffer& packet) {
         }
     }
 
+    if (ctx_.server_state) {
+        std::lock_guard<std::mutex> lock(ctx_.server_state->mutex);
+        ctx_.server_state->auth_failures.erase(remote_ip_);
+        ctx_.server_state->auth_ban_until.erase(remote_ip_);
+
+        auto it = ctx_.server_state->active_clients.find(conn.client_id);
+        if (it != ctx_.server_state->active_clients.end()) {
+            auto old_session = it->second.lock();
+            if (old_session && old_session.get() != this) {
+                Logger::instance().info("Client {} reconnecting, closing old session", conn.client_id);
+                old_session->close();
+            }
+        }
+        ctx_.server_state->active_clients[conn.client_id] = shared_from_this();
+    }
+
     client_id_ = conn.client_id;
     username_ = conn.username;
     clean_session_ = conn.clean_session;
+
+    auto max_kal = Config::instance().max_keepalive();
     keepalive_ = conn.keepalive;
+    if (keepalive_ == 0) {
+        keepalive_ = static_cast<uint16_t>(max_kal);
+    } else if (keepalive_ > max_kal) {
+        keepalive_ = static_cast<uint16_t>(max_kal);
+    }
+
     connected_ = true;
 
     bool session_present = false;
@@ -221,20 +355,25 @@ void Session::handle_connect(Buffer& packet) {
 
     start_keepalive();
 
-    Logger::instance().info("Client connected: {} (clean={})", client_id_, clean_session_);
+    Logger::instance().info("Client connected: {} (clean={}) from {}", client_id_, clean_session_, remote_ip_);
 }
 
 void Session::handle_publish(Buffer& packet, const FixedHeader& hdr) {
     if (!connected_) return;
 
-    auto pub = PublishPacket::parse(packet, hdr);
+    PublishPacket pub;
+    try {
+        pub = PublishPacket::parse(packet, hdr);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid PUBLISH from {}: {}", remote_ip_, e.what());
+        close();
+        return;
+    }
 
-    if (!username_.empty()) {
-        auto access = ctx_.auth->check_acl(username_, pub.topic, Access::WRITE);
-        if (access == Access::NONE) {
-            Logger::instance().warn("ACL denied PUBLISH for {} on {}", client_id_, pub.topic);
-            return;
-        }
+    auto access = ctx_.auth->check_acl(username_, pub.topic, Access::WRITE);
+    if (access == Access::NONE) {
+        Logger::instance().warn("ACL denied PUBLISH for {} on {}", client_id_, pub.topic);
+        return;
     }
 
     if (!topic::is_valid_topic(pub.topic)) {
@@ -243,14 +382,13 @@ void Session::handle_publish(Buffer& packet, const FixedHeader& hdr) {
     }
 
     if (pub.retain) {
-        if (pub.payload.empty()) {
-            RetainedMessage rm;
-            ctx_.topic_tree->set_retained(pub.topic, rm);
-        } else {
-            RetainedMessage rm;
+        RetainedMessage rm;
+        if (!pub.payload.empty()) {
             rm.payload = Buffer(pub.payload.data(), pub.payload.size());
             rm.qos = pub.qos;
-            ctx_.topic_tree->set_retained(pub.topic, rm);
+        }
+        if (!ctx_.topic_tree->set_retained(pub.topic, rm)) {
+            Logger::instance().warn("Retained message limit reached, dropping for topic: {}", pub.topic);
         }
     }
 
@@ -276,7 +414,15 @@ void Session::handle_publish(Buffer& packet, const FixedHeader& hdr) {
 void Session::handle_subscribe(Buffer& packet) {
     if (!connected_) return;
 
-    auto sub = SubscribePacket::parse(packet, 0);
+    SubscribePacket sub;
+    try {
+        sub = SubscribePacket::parse(packet, 0);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid SUBSCRIBE from {}: {}", remote_ip_, e.what());
+        close();
+        return;
+    }
+
     std::vector<SubackCode> return_codes;
 
     for (const auto& filter : sub.filters) {
@@ -285,10 +431,18 @@ void Session::handle_subscribe(Buffer& packet) {
             continue;
         }
 
-        if (!username_.empty()) {
-            auto access = ctx_.auth->check_acl(username_, filter.topic_filter, Access::READ);
-            if (access == Access::NONE) {
-                Logger::instance().warn("ACL denied SUBSCRIBE for {} on {}", client_id_, filter.topic_filter);
+        auto access = ctx_.auth->check_acl(username_, filter.topic_filter, Access::READ);
+        if (access == Access::NONE) {
+            Logger::instance().warn("ACL denied SUBSCRIBE for {} on {}", client_id_, filter.topic_filter);
+            return_codes.push_back(SubackCode::FAILURE);
+            continue;
+        }
+
+        if (!clean_session_) {
+            auto existing = ctx_.sub_manager->get_client_subs(client_id_);
+            auto max_subs = Config::instance().max_subscriptions_per_client();
+            if (static_cast<int>(existing.size()) >= max_subs) {
+                Logger::instance().warn("Max subscriptions reached for {} ({})", client_id_, max_subs);
                 return_codes.push_back(SubackCode::FAILURE);
                 continue;
             }
@@ -323,7 +477,14 @@ void Session::handle_subscribe(Buffer& packet) {
 void Session::handle_unsubscribe(Buffer& packet) {
     if (!connected_) return;
 
-    auto unsub = UnsubscribePacket::parse(packet, 0);
+    UnsubscribePacket unsub;
+    try {
+        unsub = UnsubscribePacket::parse(packet, 0);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid UNSUBSCRIBE from {}: {}", remote_ip_, e.what());
+        close();
+        return;
+    }
 
     for (const auto& filter : unsub.topic_filters) {
         ctx_.topic_tree->unsubscribe(filter, shared_from_this());
@@ -343,38 +504,79 @@ void Session::handle_pingreq() {
 }
 
 void Session::handle_disconnect() {
-    Logger::instance().info("Client disconnected: {}", client_id_);
+    Logger::instance().info("Client disconnected: {} from {}", client_id_, remote_ip_);
     connected_ = false;
     close();
 }
 
 void Session::handle_puback(Buffer& packet) {
     if (!connected_) return;
-    auto puback = PubackPacket::parse(packet);
-    ctx_.delivery->handle_puback(client_id_, puback.packet_id);
+    try {
+        auto puback = PubackPacket::parse(packet);
+        ctx_.delivery->handle_puback(client_id_, puback.packet_id);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid PUBACK from {}: {}", remote_ip_, e.what());
+        close();
+    }
 }
 
 void Session::handle_pubrec(Buffer& packet) {
     if (!connected_) return;
-    auto pubrec = PubrecPacket::parse(packet);
-    ctx_.delivery->handle_pubrec(client_id_, pubrec.packet_id);
+    try {
+        auto pubrec = PubrecPacket::parse(packet);
+        ctx_.delivery->handle_pubrec(client_id_, pubrec.packet_id);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid PUBREC from {}: {}", remote_ip_, e.what());
+        close();
+    }
 }
 
 void Session::handle_pubrel(Buffer& packet) {
     if (!connected_) return;
-    auto pubrel = PubrelPacket::parse(packet);
-    ctx_.delivery->handle_pubrel(client_id_, pubrel.packet_id);
-    auto pubcomp = PacketBuilder::build_pubcomp(pubrel.packet_id);
-    deliver(pubcomp);
+    try {
+        auto pubrel = PubrelPacket::parse(packet);
+        ctx_.delivery->handle_pubrel(client_id_, pubrel.packet_id);
+        auto pubcomp = PacketBuilder::build_pubcomp(pubrel.packet_id);
+        deliver(pubcomp);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid PUBREL from {}: {}", remote_ip_, e.what());
+        close();
+    }
 }
 
 void Session::handle_pubcomp(Buffer& packet) {
     if (!connected_) return;
-    auto pubcomp = PubcompPacket::parse(packet);
-    ctx_.delivery->handle_pubcomp(client_id_, pubcomp.packet_id);
+    try {
+        auto pubcomp = PubcompPacket::parse(packet);
+        ctx_.delivery->handle_pubcomp(client_id_, pubcomp.packet_id);
+    } catch (const std::exception& e) {
+        Logger::instance().warn("Invalid PUBCOMP from {}: {}", remote_ip_, e.what());
+        close();
+    }
 }
 
 void Session::close() {
+    if (ctx_.server_state) {
+        std::lock_guard<std::mutex> lock(ctx_.server_state->mutex);
+
+        auto ip_it = ctx_.server_state->connections_per_ip.find(remote_ip_);
+        if (ip_it != ctx_.server_state->connections_per_ip.end()) {
+            if (--ip_it->second <= 0) {
+                ctx_.server_state->connections_per_ip.erase(ip_it);
+            }
+        }
+
+        if (!client_id_.empty()) {
+            auto it = ctx_.server_state->active_clients.find(client_id_);
+            if (it != ctx_.server_state->active_clients.end()) {
+                auto existing = it->second.lock();
+                if (existing.get() == this) {
+                    ctx_.server_state->active_clients.erase(it);
+                }
+            }
+        }
+    }
+
     if (!clean_session_ && !client_id_.empty()) {
         // Persistent session: keep subscriptions
     } else if (!client_id_.empty()) {
@@ -387,6 +589,9 @@ void Session::close() {
 
     connected_ = false;
     boost::system::error_code ec;
+    if (ssl_stream_) {
+        ssl_stream_->shutdown(ec);
+    }
     socket_.close(ec);
 }
 
@@ -406,6 +611,6 @@ void Session::start_keepalive() {
 }
 
 void Session::on_keepalive_timeout() {
-    Logger::instance().warn("Keepalive timeout for client: {}", client_id_);
+    Logger::instance().warn("Keepalive timeout for client: {} from {}", client_id_, remote_ip_);
     close();
 }

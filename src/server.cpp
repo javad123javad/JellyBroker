@@ -1,5 +1,7 @@
 #include "server.h"
 #include "logger.h"
+#include "config.h"
+#include <boost/asio/ip/host_name.hpp>
 
 Server::Server(boost::asio::io_context& io,
                BrokerContext& ctx,
@@ -48,21 +50,39 @@ void Server::on_accept(const boost::system::error_code& ec,
         return;
     }
 
+    auto remote_ip = socket->remote_endpoint().address().to_string();
+
+    // Global connection limit
     if (active_connections_.load() >= max_connections_) {
-        Logger::instance().warn("Max connections reached, rejecting");
+        Logger::instance().warn("Max connections reached, rejecting {}", remote_ip);
         boost::system::error_code close_ec;
         socket->close(close_ec);
         do_accept();
         return;
     }
 
+    // Per-IP connection limit
+    if (ctx_.server_state) {
+        auto max_per_ip = Config::instance().max_connections_per_ip();
+        std::lock_guard<std::mutex> lock(ctx_.server_state->mutex);
+        int ip_count = ++ctx_.server_state->connections_per_ip[remote_ip];
+        if (ip_count > max_per_ip) {
+            --ctx_.server_state->connections_per_ip[remote_ip];
+            Logger::instance().warn("Per-IP limit reached for {} ({}), rejecting", remote_ip, max_per_ip);
+            boost::system::error_code close_ec;
+            socket->close(close_ec);
+            do_accept();
+            return;
+        }
+    }
+
     auto session = std::make_shared<Session>(
-        std::move(*socket), ctx_);
+        std::move(*socket), ctx_, remote_ip);
 
     active_connections_.fetch_add(1);
     session->start();
 
-    Logger::instance().info("New connection accepted (active: {})", active_connections_.load());
+    Logger::instance().info("New connection from {} (active: {})", remote_ip, active_connections_.load());
 
     do_accept();
 }

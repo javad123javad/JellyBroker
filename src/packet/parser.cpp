@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "config.h"
 
 PacketParser::PacketParser() {
     reset();
@@ -19,6 +20,11 @@ std::string PacketParser::error_message() const {
 
 void PacketParser::feed(const uint8_t* data, size_t len) {
     if (data && len > 0) {
+        auto max_buf = Config::instance().max_parser_buffer_size();
+        if (buffer_.size() + len > static_cast<size_t>(max_buf)) {
+            error_msg_ = "Parser buffer overflow";
+            return;
+        }
         buffer_.write(data, len);
     }
 }
@@ -38,23 +44,26 @@ FixedHeader PacketParser::decode_header() const {
 
 uint32_t PacketParser::decode_remaining_length(size_t& pos) const {
     uint32_t value = 0;
-    int multiplier = 1;
-    pos = 1;  // after fixed header byte
+    uint32_t multiplier = 1;
+    int count = 0;
+    pos = 1;
 
     while (pos < buffer_.size()) {
         uint8_t enc = buffer_.data()[pos];
         value += (enc & 0x7F) * multiplier;
-        multiplier *= 128;
         ++pos;
+        ++count;
 
         if (!(enc & 0x80)) {
             return value;
         }
 
-        if (multiplier > 128 * 128 * 128 * 128) {
+        // Check overflow BEFORE multiplying
+        if (count >= 4 || multiplier > 2097152) {
             error_msg_ = "Malformed remaining length";
             return 0;
         }
+        multiplier *= 128;
     }
 
     return 0;  // incomplete
@@ -77,6 +86,13 @@ bool PacketParser::try_extract(Buffer& out) {
     uint32_t remaining = decode_remaining_length(header_end);
     if (has_error()) return false;
     if (remaining == 0 && header_end == 0) return false;  // incomplete
+
+    // Check max packet size
+    auto max_size = Config::instance().max_packet_size();
+    if (remaining > static_cast<uint32_t>(max_size)) {
+        error_msg_ = "Packet too large: " + std::to_string(remaining);
+        return false;
+    }
 
     size_t total_size = header_end + remaining;
     if (buffer_.size() < total_size) return false;  // not enough data yet
