@@ -1,7 +1,6 @@
 build/
 logs/
 *.log
-ClientPy/
 .vscode/
 __pycache__/
 *.exe
