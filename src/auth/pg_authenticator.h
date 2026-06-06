@@ -1,12 +1,14 @@
 #pragma once
 #include "authenticator.h"
-#include <pqxx/pqxx>
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#if HAS_LIBPQXX
+#include <pqxx/pqxx>
 
 class PgAuthenticator : public Authenticator {
 public:
@@ -47,3 +49,4 @@ private:
 
     std::string hash_password(const std::string& password, const std::string& salt) const;
 };
+#endif

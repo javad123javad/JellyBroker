@@ -44,7 +44,9 @@ if(NOT libpqxx_FOUND)
 endif()
 
 # OpenSSL (required for password hashing)
-set(OPENSSL_ROOT_DIR "C:/msys64/ucrt64" CACHE PATH "OpenSSL root directory")
+if(WIN32)
+    set(OPENSSL_ROOT_DIR "C:/msys64/ucrt64" CACHE PATH "OpenSSL root directory")
+endif()
 find_package(OpenSSL REQUIRED)
 
 # Google Test (tests only)

@@ -1,4 +1,5 @@
 #include "pg_authenticator.h"
+#if HAS_LIBPQXX
 #include "topic/filter.h"
 #include <openssl/evp.h>
 #include <sstream>
@@ -167,3 +168,4 @@ Access PgAuthenticator::check_acl(const std::string& username,
 
     return Access::NONE;
 }
+#endif

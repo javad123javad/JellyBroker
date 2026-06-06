@@ -15,7 +15,10 @@ import threading
 
 import paho.mqtt.client as mqtt
 
-BROKER_BIN = os.path.join(os.path.dirname(__file__), "..", "build", "src", "mqtt_broker.exe")
+_broker_path = os.path.join(os.path.dirname(__file__), "..", "build", "src", "mqtt_broker.exe")
+if not os.path.exists(_broker_path):
+    _broker_path = _broker_path.replace(".exe", "")
+BROKER_BIN = _broker_path
 BASE_PORT = 18830
 
 def find_free_port(start):

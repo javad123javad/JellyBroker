@@ -1,0 +1,17 @@
+build/
+logs/
+__pycache__/
+*.exe
+*.a
+*.o
+*.obj
+*.gcda
+*.gcno
+*.gcov
+*.gcov.json.gz
+.git/
+libs/
+tools/
+ClientPy/
+coverage/
+.vscode/

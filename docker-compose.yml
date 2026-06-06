@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mqtt
+      POSTGRES_USER: mqtt
+      POSTGRES_PASSWORD: mqtt
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./config/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mqtt"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  broker:
+    build: .
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+      - "5353:5353/udp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config/broker.json:/etc/mqtt-broker/broker.json:ro
+      - logs:/var/log/mqtt-broker
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  logs:

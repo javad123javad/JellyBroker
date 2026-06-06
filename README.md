@@ -174,6 +174,17 @@ cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build
 ```
 
+### Docker
+
+```bash
+# Build and run (standalone, no PostgreSQL)
+docker build -t mqtt-broker .
+docker run -p 1883:1883 -p 5353:5353/udp mqtt-broker
+
+# Full stack with PostgreSQL auth
+docker compose up --build
+```
+
 ### CMake Options
 
 | Option | Default | Description |
