@@ -126,6 +126,11 @@ int Config::pg_pool_size() const {
                .value("pool_size", 4);
 }
 
+int Config::acl_cache_ttl() const {
+    return json_.value("auth", nlohmann::json::object())
+               .value("acl_cache_ttl", 60);
+}
+
 bool Config::tls_enabled() const {
     return json_.value("tls", nlohmann::json::object()).value("enabled", false);
 }
@@ -176,6 +181,12 @@ bool Config::is_valid() const {
             validation_error_ = "tls.key_file is required when TLS is enabled";
             return false;
         }
+    }
+
+    auto cache_ttl = acl_cache_ttl();
+    if (cache_ttl < 0) {
+        validation_error_ = "acl_cache_ttl must be >= 0 (0 disables caching)";
+        return false;
     }
 
     return true;

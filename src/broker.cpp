@@ -21,6 +21,7 @@ void Broker::update_context() {
     ctx_.delivery = &delivery_;
     ctx_.server_state = &server_state_;
     ctx_.ssl_ctx = ssl_ctx_.get();
+    ctx_.counters = &counters_;
 }
 
 void Broker::run() {
@@ -86,7 +87,8 @@ void Broker::setup_auth() {
         try {
             auth_ = std::make_unique<PgAuthenticator>(
                 config_.pg_connection_string(),
-                config_.pg_pool_size());
+                config_.pg_pool_size(),
+                config_.acl_cache_ttl());
             Logger::instance().info("Authentication: PostgreSQL");
             return;
         } catch (const std::exception& e) {

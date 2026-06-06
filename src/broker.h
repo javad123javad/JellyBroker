@@ -41,6 +41,7 @@ private:
     ServerState server_state_;
     std::unique_ptr<boost::asio::ssl::context> ssl_ctx_;
 
+    MessageCounters counters_;
     BrokerContext ctx_;
 
     std::unique_ptr<Server> server_;

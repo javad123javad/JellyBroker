@@ -32,6 +32,7 @@
     },
     "auth": {
         "backend": "allow_all",
+        "acl_cache_ttl": 60,
         "postgres": {
             "connection_string": "host=localhost port=5432 dbname=mqtt user=mqtt password=mqtt",
             "pool_size": 4

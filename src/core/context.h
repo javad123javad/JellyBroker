@@ -3,6 +3,7 @@
 #include "subscription.h"
 #include "auth/authenticator.h"
 #include "core/delivery_engine.h"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +24,13 @@ struct ServerState {
     std::unordered_map<std::string, int> connections_per_ip;
 };
 
+struct MessageCounters {
+    std::atomic<int64_t> received{0};
+    std::atomic<int64_t> published{0};
+    std::atomic<int64_t> dropped{0};
+    std::atomic<int64_t> subscribed{0};
+};
+
 struct BrokerContext {
     TopicTree* topic_tree = nullptr;
     SubscriptionManager* sub_manager = nullptr;
@@ -30,4 +38,5 @@ struct BrokerContext {
     DeliveryEngine* delivery = nullptr;
     ServerState* server_state = nullptr;
     boost::asio::ssl::context* ssl_ctx = nullptr;
+    MessageCounters* counters = nullptr;
 };

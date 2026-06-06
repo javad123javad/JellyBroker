@@ -1,4 +1,5 @@
 build/
+coverage/
 logs/
 *.log
 .vscode/
@@ -7,3 +8,7 @@ __pycache__/
 *.a
 *.o
 *.obj
+*.gcda
+*.gcno
+*.gcov
+*.gcov.json.gz

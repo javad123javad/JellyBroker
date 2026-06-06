@@ -373,13 +373,17 @@ void Session::handle_publish(Buffer& packet, const FixedHeader& hdr) {
     auto access = ctx_.auth->check_acl(username_, pub.topic, Access::WRITE);
     if (access == Access::NONE) {
         Logger::instance().warn("ACL denied PUBLISH for {} on {}", client_id_, pub.topic);
+        if (ctx_.counters) ctx_.counters->dropped++;
         return;
     }
 
     if (!topic::is_valid_topic(pub.topic)) {
         Logger::instance().warn("Invalid topic from {}: {}", client_id_, pub.topic);
+        if (ctx_.counters) ctx_.counters->dropped++;
         return;
     }
+
+    if (ctx_.counters) ctx_.counters->received++;
 
     if (pub.retain) {
         RetainedMessage rm;
@@ -395,17 +399,20 @@ void Session::handle_publish(Buffer& packet, const FixedHeader& hdr) {
     switch (pub.qos) {
         case 0:
             ctx_.delivery->publish_from_client(*ctx_.topic_tree, pub);
+            if (ctx_.counters) ctx_.counters->published++;
             break;
         case 1: {
             auto puback = PacketBuilder::build_puback(pub.packet_id);
             deliver(puback);
             ctx_.delivery->publish_from_client(*ctx_.topic_tree, pub);
+            if (ctx_.counters) ctx_.counters->published++;
             break;
         }
         case 2: {
             auto pubrec = PacketBuilder::build_pubrec(pub.packet_id);
             deliver(pubrec);
-            ctx_.delivery->publish_from_client(*ctx_.topic_tree, pub);
+            ctx_.delivery->store_incoming_qos2(client_id_, std::move(pub));
+            // published incremented on PUBREL completion
             break;
         }
     }
@@ -458,6 +465,7 @@ void Session::handle_subscribe(Buffer& packet) {
         }
 
         return_codes.push_back(static_cast<SubackCode>(filter.requested_qos));
+        if (ctx_.counters) ctx_.counters->subscribed++;
 
         auto retained = ctx_.topic_tree->get_all_retained();
         for (const auto& [topic, msg] : retained) {
@@ -535,9 +543,13 @@ void Session::handle_pubrel(Buffer& packet) {
     if (!connected_) return;
     try {
         auto pubrel = PubrelPacket::parse(packet);
-        ctx_.delivery->handle_pubrel(client_id_, pubrel.packet_id);
-        auto pubcomp = PacketBuilder::build_pubcomp(pubrel.packet_id);
-        deliver(pubcomp);
+        if (ctx_.delivery->complete_incoming_qos2(client_id_, pubrel.packet_id, *ctx_.topic_tree)) {
+            if (ctx_.counters) ctx_.counters->published++;
+            auto pubcomp = PacketBuilder::build_pubcomp(pubrel.packet_id);
+            deliver(pubcomp);
+        } else {
+            ctx_.delivery->handle_pubrel(client_id_, pubrel.packet_id);
+        }
     } catch (const std::exception& e) {
         Logger::instance().warn("Invalid PUBREL from {}: {}", remote_ip_, e.what());
         close();
@@ -575,6 +587,10 @@ void Session::close() {
                 }
             }
         }
+    }
+
+    if (!client_id_.empty()) {
+        ctx_.delivery->clear_client_incoming(client_id_);
     }
 
     if (!clean_session_ && !client_id_.empty()) {

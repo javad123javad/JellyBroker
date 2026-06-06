@@ -33,6 +33,7 @@ public:
     std::string auth_backend() const;
     std::string pg_connection_string() const;
     int pg_pool_size() const;
+    int acl_cache_ttl() const;
 
     bool tls_enabled() const;
     std::string tls_cert_file() const;

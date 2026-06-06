@@ -66,6 +66,7 @@ uint32_t PacketParser::decode_remaining_length(size_t& pos) const {
         multiplier *= 128;
     }
 
+    pos = 0; // mark as incomplete
     return 0;  // incomplete
 }
 

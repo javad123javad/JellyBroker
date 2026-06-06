@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Coverage flags (Debug only)
+if(CMAKE_BUILD_TYPE STREQUAL "Coverage" OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        add_compile_options(-fprofile-arcs -ftest-coverage -g -O0)
+        add_link_options(-fprofile-arcs)
+    endif()
+endif()
+
 # ── Dependencies via FetchContent ──────────────────────────
 include(FetchContent)
 
@@ -36,6 +44,7 @@ if(NOT libpqxx_FOUND)
 endif()
 
 # OpenSSL (required for password hashing)
+set(OPENSSL_ROOT_DIR "C:/msys64/ucrt64" CACHE PATH "OpenSSL root directory")
 find_package(OpenSSL REQUIRED)
 
 # Google Test (tests only)

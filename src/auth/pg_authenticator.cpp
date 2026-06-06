@@ -4,8 +4,8 @@
 #include <sstream>
 #include <iomanip>
 
-PgAuthenticator::PgAuthenticator(const std::string& conn_str, int pool_size)
-    : conn_str_(conn_str) {
+PgAuthenticator::PgAuthenticator(const std::string& conn_str, int pool_size, int cache_ttl_seconds)
+    : conn_str_(conn_str), cache_ttl_(cache_ttl_seconds) {
     for (int i = 0; i < pool_size; ++i) {
         auto pc = std::make_unique<PooledConnection>();
         pc->conn = std::make_unique<pqxx::connection>(conn_str_);
@@ -100,13 +100,11 @@ AuthResult PgAuthenticator::authenticate(const std::string& client_id,
     return result;
 }
 
-Access PgAuthenticator::check_acl(const std::string& username,
-                                  const std::string& topic,
-                                  Access required) {
-    auto* pc = acquire();
-    if (!pc) return Access::NONE;
+PgAuthenticator::AclCacheEntry PgAuthenticator::load_acl_rules(const std::string& username) {
+    AclCacheEntry entry;
 
-    Access result = Access::NONE;
+    auto* pc = acquire();
+    if (!pc) return entry;
 
     try {
         pqxx::work txn(*pc->conn);
@@ -118,22 +116,50 @@ Access PgAuthenticator::check_acl(const std::string& username,
         for (const auto& row : query) {
             std::string topic_filter = row[0].as<std::string>();
             int access_level = row[1].as<int>();
-
-            if (topic::matches(topic, topic_filter)) {
-                auto acc = static_cast<Access>(access_level);
-                if (static_cast<int>(acc) > static_cast<int>(result)) {
-                    result = acc;
-                }
-            }
+            entry.rules.emplace_back(std::move(topic_filter), static_cast<Access>(access_level));
         }
 
         txn.commit();
     } catch (const std::exception& e) {
         release(pc);
-        return Access::NONE;
+        return entry;
     }
 
     release(pc);
+
+    if (cache_ttl_ > 0) {
+        entry.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(cache_ttl_);
+    }
+
+    return entry;
+}
+
+Access PgAuthenticator::check_acl(const std::string& username,
+                                  const std::string& topic,
+                                  Access required) {
+    AclCacheEntry entry;
+
+    if (cache_ttl_ > 0) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        auto it = acl_cache_.find(username);
+        if (it != acl_cache_.end() && std::chrono::steady_clock::now() < it->second.expiry) {
+            entry = it->second;
+        } else {
+            entry = load_acl_rules(username);
+            acl_cache_[username] = entry;
+        }
+    } else {
+        entry = load_acl_rules(username);
+    }
+
+    Access result = Access::NONE;
+    for (const auto& [topic_filter, acc] : entry.rules) {
+        if (topic::matches(topic, topic_filter)) {
+            if (static_cast<int>(acc) > static_cast<int>(result)) {
+                result = acc;
+            }
+        }
+    }
 
     if (static_cast<int>(result) >= static_cast<int>(required)) {
         return result;

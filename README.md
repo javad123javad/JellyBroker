@@ -150,7 +150,7 @@ Client ──TCP/TLS──→ Server accept
 ```bash
 git clone <repo>
 cd mqtt-broker
-cmake -B build
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -B build
 cmake --build build
 ./build/src/mqtt_broker          # uses config/broker.json
 ./build/src/mqtt_broker my.json  # custom config
@@ -159,8 +159,17 @@ cmake --build build
 ### Windows (MSYS2 UCRT64)
 
 ```bash
-pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,boost,openssl,gtest}
-cmake -B build -G "MSYS Makefiles"
+# Install dependencies
+pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,boost,openssl,gtest}
+
+# Build (Ninja required — NMake is not supported)
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -B build
+cmake --build build
+
+# If OpenSSL is not found automatically:
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DOPENSSL_ROOT_DIR=C:/msys64/ucrt64 \
+      -B build
 cmake --build build
 ```
 
@@ -168,7 +177,8 @@ cmake --build build
 
 | Option | Default | Description |
 |---|---|---|
-| `HAS_LIBPQXX` | auto | Enable PostgreSQL auth backend (requires libpqxx) |
+| `CMAKE_BUILD_TYPE` | (none) | `Debug` for development, `Coverage` for code coverage |
+| libpqxx | auto-detected | PostgreSQL auth backend — install libpqxx to enable |
 
 ## Configuration
 
@@ -243,6 +253,7 @@ See `config/broker.json` for the default config file.
 {
     "auth": {
         "backend": "allow_all",
+        "acl_cache_ttl": 60,
         "postgres": {
             "connection_string": "host=localhost port=5432 dbname=mqtt user=mqtt password=mqtt",
             "pool_size": 4
@@ -250,6 +261,13 @@ See `config/broker.json` for the default config file.
     }
 }
 ```
+
+| Key | Default | Description |
+|---|---|---|
+| `backend` | `allow_all` | `"allow_all"` (dev) or `"postgres"` |
+| `acl_cache_ttl` | `60` | ACL cache lifetime in seconds (`0` disables caching) |
+| `postgres.connection_string` | — | libpqxx connection string |
+| `postgres.pool_size` | `4` | Connection pool size |
 
 ## Authentication & ACLs
 
@@ -315,7 +333,7 @@ Packet IDs are allocated from a per-client pool with collision avoidance: `in_us
 |---|---|
 | **Transport encryption** | TLS via `boost::asio::ssl::stream` (config.pem cert+key) |
 | **Authentication** | AllowAll (dev) or PostgreSQL (SHA-256 password hash) |
-| **Authorization** | Per-topic ACLs (READ/WRITE/READWRITE) |
+| **Authorization** | Per-topic ACLs (READ/WRITE/READWRITE) with TTL-based caching |
 | **Brute force protection** | Per-IP rate limiting with configurable ban |
 | **Client-ID takeover** | Old session disconnected on duplicate CONNECT |
 | **Connection limits** | Global and per-IP caps |
@@ -341,35 +359,68 @@ Packet IDs are allocated from a per-client pool with collision avoidance: `in_us
 
 ## Testing
 
-### Unit Tests
+### Unit Tests (32 tests)
 
 ```bash
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -B build
 cmake --build build
-./build/tests/mqtt_broker_tests.exe
+./build/tests/mqtt_broker_tests
 ```
 
-Test suites:
-- `BufferTest` (9 tests) — Buffer read/write, remaining-length, edge cases
-- `ParserTest` (9 tests) — Packet parsing, building round-trip, multi-packet
-- `TopicFilterTest` (8 tests) — Exact match, wildcards, validation
-- `TopicTreeTest` (6 tests) — Subscribe/lookup, wildcards, retained messages
+| Suite | Tests | What it covers |
+|---|---|---|
+| `BufferTest` | 9 | Read/write, remaining-length encode/decode, edge cases |
+| `ParserTest` | 9 | Packet parsing, builder round-trip, multi-packet streams |
+| `TopicFilterTest` | 8 | Exact match, `+`/`#` wildcards, validation, split |
+| `TopicTreeTest` | 6 | Subscribe/lookup, wildcard dispatch, retained messages |
 
-### End-to-End Test
+### Integration Tests (11 tests)
+
+Requires Python 3 + [paho-mqtt](https://pypi.org/project/paho-mqtt/). Starts/stops the broker automatically per test class.
 
 ```bash
-# Start broker
-./build/src/mqtt_broker &
-
-# Run test (requires paho-mqtt)
 pip install paho-mqtt
-python ClientPy/test_broker.py
+python ClientPy/test_integration.py
 ```
+
+| Test class | Tests | What it covers |
+|---|---|---|
+| `TestConnect` | 3 | Clean/no-clean session, multiple concurrent clients |
+| `TestPublishSubscribe` | 5 | QoS 0/1/2 pub/sub, multiple subscribers |
+| `TestWildcards` | 2 | Single-level (`+`) and multi-level (`#`) matching |
+| `TestRetained` | 1 | Retained message storage and delivery on subscribe |
 
 ### Stress Test
 
 ```bash
 python ClientPy/stress_test.py 127.0.0.1 1883 \
     --connections 500 --clients 100 --messages 1000
+```
+
+### Code Coverage
+
+Build with `Coverage` type and run unit tests (requires gcovr):
+
+```bash
+# Generate HTML + text reports in coverage/
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Coverage -B build
+cmake --build build
+./build/tests/mqtt_broker_tests
+mkdir -p coverage
+python -m gcovr -r . --filter "src/(config\.|packet|topic|utils|auth|qos|core|delivery)" \
+    --exclude ".*_deps.*" --exclude ".*googletest.*" \
+    --html --html-details -o coverage/index.html
+python -m gcovr -r . --filter "src/(config\.|packet|topic|utils|auth|qos|core|delivery)" \
+    --exclude ".*_deps.*" --exclude ".*googletest.*" \
+    --txt -o coverage/report.txt
+```
+
+Or use the helper script:
+
+```bash
+pwsh coverage/coverage.ps1
+# → coverage/index.html (drillable HTML report)
+# → coverage/report.txt (text summary)
 ```
 
 ## Performance
