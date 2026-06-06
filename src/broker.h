@@ -9,6 +9,7 @@
 #endif
 #include "core/delivery_engine.h"
 #include "core/context.h"
+#include "mdns/mdns_responder.h"
 #include "server.h"
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl.hpp>
@@ -45,6 +46,7 @@ private:
     BrokerContext ctx_;
 
     std::unique_ptr<Server> server_;
+    std::unique_ptr<MdnsResponder> mdns_;
 
     boost::asio::signal_set signals_;
     std::vector<std::thread> threads_;

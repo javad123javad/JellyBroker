@@ -1,5 +1,6 @@
 #include "broker.h"
 #include "logger.h"
+#include <boost/asio/ip/host_name.hpp>
 #include <iostream>
 #include <stdexcept>
 
@@ -37,6 +38,16 @@ void Broker::run() {
         config_.max_connections());
 
     server_->start();
+
+    if (config_.mdns_enabled()) {
+        auto hostname = boost::asio::ip::host_name();
+        auto ip = config_.host();
+        if (ip == "0.0.0.0") ip = "127.0.0.1";
+        mdns_ = std::make_unique<MdnsResponder>(
+            io_, config_.port(), hostname, ip);
+        mdns_->start();
+    }
+
     running_ = true;
 
     Logger::instance().info("MQTT Broker started on port {} with {} workers",
@@ -58,6 +69,11 @@ void Broker::shutdown() {
     running_ = false;
 
     Logger::instance().info("Shutting down MQTT Broker...");
+
+    if (mdns_) {
+        mdns_->stop();
+        mdns_.reset();
+    }
 
     if (server_) {
         server_->stop();

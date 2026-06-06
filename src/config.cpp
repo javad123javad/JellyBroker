@@ -192,6 +192,10 @@ bool Config::is_valid() const {
     return true;
 }
 
+bool Config::mdns_enabled() const {
+    return json_.value("mdns", nlohmann::json::object()).value("enabled", false);
+}
+
 std::string Config::validation_error() const {
     return validation_error_;
 }

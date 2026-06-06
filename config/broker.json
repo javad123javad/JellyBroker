@@ -26,6 +26,9 @@
         "key_file": "",
         "ca_file": ""
     },
+    "mdns": {
+        "enabled": true
+    },
     "logging": {
         "level": "info",
         "file": "logs/broker.log"

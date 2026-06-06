@@ -18,6 +18,7 @@ set(COMMON_SOURCES
     qos/qos2.h qos/qos2.cpp
     core/context.h
     core/delivery_engine.h core/delivery_engine.cpp
+    mdns/mdns_responder.h mdns/mdns_responder.cpp
     session.h session.cpp
     server.h server.cpp
     broker.h broker.cpp

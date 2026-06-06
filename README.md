@@ -82,12 +82,13 @@ Layer 7: Server          ┌──────────▼──────�
                          └──────────┬──────────────────┘
                                     │
 Layer 8: Orchestrator    ┌──────────▼──────────────────┐
-                         │ Broker                      │
-                         │ ├── owns all services       │
-                         │ ├── ServerState (shared)    │
-                         │ ├── TLS context setup       │
-                         │ └── signal handling         │
-                         └─────────────────────────────┘
+                          │ Broker                      │
+                          │ ├── owns all services       │
+                          │ ├── ServerState (shared)    │
+                          │ ├── TLS context setup       │
+                          │ ├── mDNS advertisement      │
+                          │ └── signal handling         │
+                          └─────────────────────────────┘
 ```
 
 ### Data Flow
@@ -268,6 +269,22 @@ See `config/broker.json` for the default config file.
 | `acl_cache_ttl` | `60` | ACL cache lifetime in seconds (`0` disables caching) |
 | `postgres.connection_string` | — | libpqxx connection string |
 | `postgres.pool_size` | `4` | Connection pool size |
+
+### mDNS Section
+
+```json
+{
+    "mdns": {
+        "enabled": true
+    }
+}
+```
+
+When enabled, the broker advertises itself via mDNS/DNS-SD on the local network as `_mqtt._tcp` service. Clients supporting DNS-SD (e.g. `avahi-browse`, Bonjour, Windows 10+ network discovery) can discover the broker automatically.
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable mDNS advertising on port 5353 |
 
 ## Authentication & ACLs
 

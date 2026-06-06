@@ -35,6 +35,8 @@ public:
     int pg_pool_size() const;
     int acl_cache_ttl() const;
 
+    bool mdns_enabled() const;
+
     bool tls_enabled() const;
     std::string tls_cert_file() const;
     std::string tls_key_file() const;
