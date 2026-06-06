@@ -1,0 +1,21 @@
+{
+    "broker": {
+        "host": "0.0.0.0",
+        "port": 1883,
+        "thread_pool_size": 4,
+        "max_connections": 100000,
+        "session_expiry_seconds": 86400,
+        "keepalive_multiplier": 1.5
+    },
+    "logging": {
+        "level": "info",
+        "file": "logs/broker.log"
+    },
+    "auth": {
+        "backend": "postgres",
+        "postgres": {
+            "connection_string": "host=localhost port=5432 dbname=mqtt user=mqtt password=mqtt",
+            "pool_size": 4
+        }
+    }
+}
