@@ -3,18 +3,23 @@ import time
 
 received = []
 
+
 def on_connect(client, userdata, flags, rc, props=None):
     print(f"Connected (rc={rc})")
-    client.subscribe("test/#")
+    client.subscribe("jellywire/sensors")
+
 
 def on_message(client, userdata, msg):
     print(f"Got: {msg.topic} -> {msg.payload.decode()}")
     received.append(msg)
 
+
 def on_subscribe(client, userdata, mid, granted_qos, props=None):
     print(f"Subscribed, publishing...")
-    info = client.publish("test/hello", "hi from python")
+    info = client.publish("jellywire/sensors",
+                          '{"TEMP": 24.5,"HUM": 32,"BATT": 85}')
     print(f"Publish rc={info.rc}, mid={info.mid}")
+
 
 try:
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)

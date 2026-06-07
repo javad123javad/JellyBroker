@@ -63,6 +63,7 @@ void Session::stop() {
 void Session::deliver(const Buffer& packet) {
     auto self = shared_from_this();
     boost::asio::dispatch(strand_, [this, self, packet]() {
+        if (!connected_) return;
         auto max_q = Config::instance().max_write_queue_size();
         if (static_cast<int>(write_queue_.size()) >= max_q) {
             Logger::instance().warn("Write queue overflow for {} ({}), closing",
@@ -113,6 +114,7 @@ void Session::on_read(const boost::system::error_code& ec, size_t bytes_transfer
 
     Buffer packet;
     while (parser_.try_extract(packet)) {
+        if (!packet.readable()) continue;
         try {
             handle_packet(packet);
         } catch (const std::exception& e) {
@@ -132,11 +134,13 @@ void Session::on_read(const boost::system::error_code& ec, size_t bytes_transfer
         keepalive_timer_->reset();
     }
 
-    do_read();
+    if (connected_) {
+        do_read();
+    }
 }
 
 void Session::do_write() {
-    if (write_queue_.empty()) {
+    if (!connected_ || write_queue_.empty()) {
         writing_ = false;
         return;
     }
@@ -568,6 +572,10 @@ void Session::handle_pubcomp(Buffer& packet) {
 }
 
 void Session::close() {
+    if (!connected_) return;
+
+    connected_ = false;
+
     if (ctx_.server_state) {
         std::lock_guard<std::mutex> lock(ctx_.server_state->mutex);
 
@@ -603,7 +611,6 @@ void Session::close() {
         ctx_.sub_manager->remove_client(client_id_);
     }
 
-    connected_ = false;
     boost::system::error_code ec;
     if (ssl_stream_) {
         ssl_stream_->shutdown(ec);
