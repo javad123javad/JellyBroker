@@ -500,6 +500,23 @@ PG_CONN_STR="host=localhost dbname=mqtt user=mqtt password=mqtt" \
 | `TestTls` | 4 | MQTT connect/pub-sub over TLS, admin STATS/CLIENTS over TLS |
 | `PostgresAuthTestCase` | 4 | PostgreSQL auth connect, bad password rejection, allowed/denied publish (skipped unless `PG_CONN_STR` is set) |
 
+### Docker Compose End-to-End Test
+
+Tests the full stack (broker + PostgreSQL) via Docker Compose. Builds the image, starts containers, seeds test users, and runs auth tests.
+
+```bash
+# Build with PostgreSQL support and run
+python3 ClientPy/test_docker_auth.py --build
+
+# Run again without rebuild (uses cached image)
+python3 ClientPy/test_docker_auth.py
+
+# Leave containers running after test for debugging
+python3 ClientPy/test_docker_auth.py --no-cleanup
+```
+
+The test connects with valid credentials, verifies bad password rejection, publishes to an ACL-allowed topic, and confirms ACL-denied publishes are silently dropped.
+
 ### Stress Test
 
 ```bash

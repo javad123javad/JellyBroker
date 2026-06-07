@@ -14,6 +14,8 @@ RUN apt-get update -qq && apt-get install -y -qq \
     libzstd-dev \
     zlib1g-dev \
     git \
+    libpqxx-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -35,6 +37,7 @@ RUN apt-get update -qq && apt-get install -y -qq \
     libboost-system1.74.0 \
     libssl3 \
     ca-certificates \
+    libpqxx-6.4 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/src/mqtt_broker /usr/local/bin/mqtt_broker
